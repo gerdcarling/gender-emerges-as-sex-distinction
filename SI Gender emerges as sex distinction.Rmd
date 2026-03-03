@@ -1,0 +1,675 @@
+---
+title: "Scripts for the analyses of the paper: Sex is the most attractive gender"
+author: "Dr. Nour Efrat-Kowalsky"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_collapsed: no
+    toc_float: yes
+    toc_depth: 5
+  pdf_document:
+    toc: yes
+    toc_depth: 5
+    latex_engine: xelatex
+  word_document: default
+header-includes:
+  - \usepackage{fvextra}
+  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,fontsize=\small,commandchars=\\\{\}}
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+options(width = 70)  # controls wrapping of printed output
+```
+
+```{css, echo=FALSE}
+/* Move code folding buttons to the left */
+div.col-md-12 .pull-right {
+  float: left !important
+}
+```
+
+# Notes
+
+This document contains the script to produce all analyses and plots for the paper "Sex is the most attractive gender:the birth and death of noun categorization in language. Authors: Carling, Gerd, Nour Efrat-Kowalsky, Niklas Erben-Johansson, Gerhard Jäger, Lev Michael, Marc Allassonnière-Tang, and Filip Larsson.
+
+
+For the phylogenetic analyses, we take the world tree from Bouckaert et al. 2022 (https://osf.io/preprints/socarxiv/f8tr6/) and extract from it the languages that are in our sample for each family.
+
+# Basic settings
+
+First, we read the basic packages and set the seed for reproducibility. The most relevant is the tidyverse work environment. See https://www.tidyverse.org/ for more details.
+```{r message=FALSE, warning=FALSE}
+# load basic packages
+library(readxl)
+library(tidyverse)
+library(knitr)
+# packages for correlation paired plot
+library(GGally)
+# packages for phylogenetics
+library(ape)
+library(phytools)
+library(phangorn)
+library(bayestraitr)
+# packages for plots
+library(diagram)
+library(ggpubr)
+library(ggtext)
+library(patchwork)
+# set seed for reproducibility 
+set.seed(10)
+# set visual options for numbers
+options(scipen=999)
+```
+
+# Transition rates between noun categorization systems
+To test the emergence of gender we infer a global phylogeny of classifier, noun class and gender languages.
+First we load the noun classification data and generate data format for BayesTraits analysis that includes one multistate variable with four states:
+* 1 = Classifiers
+* 2 = NounClass
+* 3 = Gender
+* 4 = Classifiers, Gender
+* 5 = NounClass, Gender
+* 6 = Classifiers, NounClass
+* 7 = none
+
+```{r message=FALSE, warning=FALSE}
+# read the data for Worldwide # Model 1
+class_gender_sys <- read_excel("S2_Global_Noun_Categorization.xlsx") %>%
+  # only take the columns we want
+  select("Glottocode", "Classifiers", "NounClass", "Gender_Pron", "Gender_Nom") %>%
+  #create a "Gender" column if a language has either pronominal or nominal gender
+  mutate(Gender = Gender_Pron | Gender_Nom) %>%
+  select(-Gender_Pron, -Gender_Nom) %>%
+  rowwise() %>%
+  mutate(Systems = paste(names(across(c(-Glottocode)))[c_across(c(-Glottocode)) == TRUE], collapse = ", ")) %>%
+  ungroup() %>%
+  mutate(Systems = if_else(Systems == "", "none", Systems)) %>%
+  select(Glottocode, Systems) %>%
+  # assign all systems into values of the same variable
+  mutate(Systems = replace(Systems, Systems == "Classifiers", 1)) %>%
+  mutate(Systems = replace(Systems, Systems == "NounClass", 2)) %>%
+  mutate(Systems = replace(Systems, Systems == "Gender", 3)) %>%
+  mutate(Systems = replace(Systems, Systems == "Classifiers, Gender", 4)) %>%
+  mutate(Systems = replace(Systems, Systems == "NounClass, Gender", 5)) %>%
+  mutate(Systems = replace(Systems, Systems == "Classifiers, NounClass", 6)) %>%
+  mutate(Systems = replace(Systems, Systems == "none", 7)) %>%
+  select(Glottocode,Systems) %>%
+  # change to data frame
+  as.data.frame() %>%
+  drop_na() #remove NAs
+```
+
+We load the phylogenetic trees and match them to our data
+```{r message=FALSE, warning=FALSE}
+# read all the tree files
+files <- list.files("all_trees/")
+# read the first tree
+trees <- ape::read.tree(paste0("all_trees/",files[1]))  %>%
+  as.multiPhylo() 
+
+# read all the other trees
+for(i in 2:length(files)){
+  # read the tree and merge it with the nexus
+  trees <- c(trees,
+             ape::read.tree(paste0("all_trees/",
+                                   files[i]))) %>%
+    # save as multiphylo object
+    as.multiPhylo()
+}
+
+# only keep tip labels where we have data
+trees_ww <- drop.tip.multiPhylo(trees, 
+                             trees[[1]]$tip.label[!trees[[1]]$tip.label %in% class_gender_sys$Glottocode])
+# only keep data for which we have the tree
+data.phy.ww.class <- class_gender_sys %>% filter(Glottocode %in% trees_ww[[1]]$tip.label)
+#write_tsv(data.phy.ww.class, "Noun_Categorization/data/class_genders_sys.txt")
+
+# re-arrange the order of tip.labels so that they match across trees
+trees_ww <- .compressTipLabel(trees_ww)
+# random check that they match
+all.equal(trees_ww[[1]]$tip.label, trees_ww[[5]]$tip.label)
+writeNexus(trees_ww %>% .uncompressTipLabel(),
+           "Noun_Categorization/trees/trees_ww.nex")
+```
+
+
+We have generated the data files (.txt) and tree files (.nex) needed for running BayesTraits.
+The config file for running the model can be found at: "/Noun_Categorization/config/class_gender_config.txt".
+The model is configured as follows:
+```{r eval = FALSE}
+1 # to run a multistate model 
+2 # MCMC 
+logfile class_gender_config-RJHPoutput
+# use the reverse jump
+RevJump gamma 1 1
+# setting stones to get the Bayes factors
+# stepping stone sampler with 100 stones and 1000 iterations per stone to estimate the marginal likelihood
+Stones 100 10000
+# Search for 1000000 generations, discard the first half
+burnin 1000000
+iterations 10000000
+sample 10000
+run
+```
+
+
+We load the results from the phylogenetic analysis and visualize the worldwide transition rates between Classifiers, Gender systems, and Noun Classes
+```{r}
+class_log<- bt_read.log('Noun_Categorization/log/class_gender-RJHPoutput.Log.txt')
+
+```
+
+We visualize the results as a density plot (Fig.2)
+
+```{r message=FALSE, warning=FALSE}
+cgs <- select(as_tibble(class_log), q12, q13, q14, q15, q16, q17, q21, q23, q24, q25, q26, q27, q31, q32, q34, q35, q36, q37, q41, q42, q43, q45, q46, q47, q51, q52, q53, q54, q56, q57, q61, q62, q63, q64, q65, q67, q71, q72, q73, q74, q75, q76) %>%
+  gather() #make long format for ggplot
+
+# Define axis labels with color highlighting
+custom_labels <- c(
+  'C->NC', 'C->G', 'C->C+G', 'C->NC+G', 'C->C+NC',
+  "<span style='color:#F08080'>C->NONE</span>",
+
+  'NC->C', 'NC->G', 'NC->C+G', 'NC->NC+G',
+  "<span style='color:#F08080'>NC->C+NC</span>",
+  'NC->NONE',
+
+  'G->C', 'G->N', 'G->C+G', 'G->NC+G', 'G->C+NC',
+  "<span style='color:#F08080'>G->NONE</span>",
+
+  "<span style='color:#F08080'>C+G->C</span>", 'C+G->NC',
+  "<span style='color:#F08080'>C+G->G</span>", 'C+G->NC+G',
+  'C+G->C+NC', "<span style='color:#F08080'>C+G->NONE</span>",
+
+  'NC+G->C', 'NC+G->NC', 'NC+G->G', 'NC+G->C+G', 'NC+G->C+NC', 'NC+G->NONE',
+
+  'C+NC->C',
+  "<span style='color:#F08080'>C+NC->NC</span>", 'C+NC->G', 'C+NC->C+G',
+  'C+NC->NC+G', "<span style='color:#F08080'>C+NC->NONE</span>",
+
+  "<span style='color:#F08080'>NONE->C</span>", 'NONE->NC', 'NONE->G',
+  'NONE->C+G', 'NONE->NC+G', 'NONE->C+NC'
+)
+
+dens_plot_cgs <- ggplot(cgs,
+                        aes(y = value, x = key, fill = key)) +
+  ylim(c(0, 0.5)) +
+  geom_boxplot(alpha = 0.5) +
+  xlab("Transition rate") +
+  ylab("Density") +
+  scale_fill_discrete(name = "Transitions") +
+  theme_classic() +
+  theme(
+    legend.position = c(2, 0.8),
+    axis.text.x = element_markdown(angle = 80, hjust = 1)  # Use element_markdown!
+  ) +
+  ggtitle("Transition rates between Classifiers, Gender Systems and Noun Classes") +  
+  scale_x_discrete(labels = custom_labels)
+
+print(dens_plot_cgs)
+ggsave("Figure2.png", dens_plot_cgs, width = 14, height = 8, dpi = 300)
+```
+# Transition rates between Pronominal and Nominal gender
+To test the hypothesis that nominal gender emerges from pronominal gender, we infer a global phylogenetic inference of pronominal gender, nominal gender, both pronominal and nominal gender or no gender system.
+We load the data, shape it into Nominal, Proniminal, Both, or None, and give them numbers for BayesTraits:
+0 = No gender system
+1 = Nominal gender only
+2 = Pronominal gender only
+3 = Both nominal and pronominal gender
+
+```{r message=FALSE, warning=FALSE}
+ww.gen.sys <- read_excel("S3_Global_Gender.xlsx") %>%
+  select("Glottocode", "System_nom", "System_pro") %>%
+  mutate(Gender = case_when(
+    System_nom %in% c("MF", "MN", "MFN", "FN") & System_pro == "NONE" ~ "Nominal",
+    System_pro %in% c("MF", "MN", "MFN", "FN") & System_nom == "NONE" ~ "Pronominal",
+    System_pro == "NONE" & System_nom == "NONE" ~ "None",
+    System_nom %in% c("MF", "MN", "MFN", "FN") & System_pro %in% c("MF", "MN", "MFN", "FN") ~ "Both",
+    TRUE ~ "Other"  # Just in case there's unexpected input
+  )) %>%
+  select(Glottocode, Gender)%>%
+  mutate(Gender = case_when(
+    Gender == "None"       ~ 0,
+    Gender == "Nominal"    ~ 1,
+    Gender == "Pronominal" ~ 2,
+    Gender == "Both"       ~ 3
+  ))
+```
+
+Again, we section out the phylogenetic trees to match the data we have and the data we have to the trees.
+
+```{r message=FALSE, warning=FALSE}
+# only keep tip labels where we have data
+trees_ww <- drop.tip.multiPhylo(trees, 
+                             trees[[1]]$tip.label[!trees[[1]]$tip.label %in% ww.gen.sys$Glottocode])
+# only keep data for which we have the tree
+data.phy.ww.np <- ww.gen.sys %>% filter(Glottocode %in% trees_ww[[1]]$tip.label)
+write_tsv(data.phy.ww.np, "Nom_Pronom/data/ww_gen_sys.txt")
+
+# re-arrange the order of tip.labels so that they match across trees
+trees_ww <- .compressTipLabel(trees_ww)
+# random check that they match
+all.equal(trees_ww[[1]]$tip.label, trees_ww[[5]]$tip.label)
+writeNexus(trees_ww %>% .uncompressTipLabel(),
+           "Nom_Pronom/trees/trees_ww.nex")
+```
+
+Now we can run BayesTraits, with the config file found at: "/Nom_Pronom/config/ww_gender_sys_config.txt".
+And load the log file here to plot the results (Fig.3a).
+```{r message=FALSE, warning=FALSE}
+gen_log<- bt_read.log('Nom_Pronom/log/world_gender_system-RJHPoutput.Log.txt')
+
+dens_gen_sys <- select(as_tibble(gen_log), q01, q02, q03, q10, q12, q13, q20, q21, q23, q31, q31, q32) %>%
+  gather() #make long format for ggplot
+
+dens_plot_gen <- ggplot(dens_gen_sys, aes(y = value, x = key, fill = key)) +
+  ylim(c(0,0.5)) +
+  geom_boxplot(alpha = 0.5) +
+  xlab("Transition rate") +
+  ylab("Density") +
+  scale_fill_discrete(name = "Transitions") +
+  theme_classic() +
+  theme(legend.position = c(2,0.8), axis.text.x=element_text(angle=30, hjust=1)) +
+  ggtitle("Transition rates between types of Gender systems") +
+  scale_x_discrete(labels = c('None->Nominal', 'None->Pronominal', 'None->Both', 'Nominal->None', 'Nominal->Pronominal', 'Nominal->Both', 'Prnominal->None', 'Prnominal->Nominal', 'Prnominal->Both', 'Both->None', 'Both->Nominal','Both->Pronominal' ))
+print(dens_plot_gen)
+```
+
+# Transition rates between types of nominal gender systems
+Next, we prepare the data for the phylogenetic analysis on the transition rates between the different types of gender systems: Masculine-Feminine, Masculine-Feminine-Neuter, Common-Neuter (here regarded as Masculine-Neuter). We change it to numeric values for BayesTraits:
+1 = Masculine-Feminine
+2 = Masculine-Feminine-Neuter
+3 = Masculine-Neuter
+4 = No nominal gender system
+```{r message=FALSE, warning=FALSE}
+ww.nom.sys <- read_excel("S3_Global_Gender.xlsx") %>%
+  # only take the columns we want
+  select("Glottocode", "System_nom") %>%
+  rename("Gender" = "System_nom") %>%
+  # assign all genders into a new gender column as 4 values of the same variable
+  mutate(Gender = replace(Gender, Gender == "MF", 1)) %>%
+  mutate(Gender = replace(Gender, Gender == "MFN", 2)) %>%
+  mutate(Gender = replace(Gender, Gender == "MN", 3)) %>%
+  mutate(Gender = replace(Gender, Gender == "NONE", 4)) %>%
+  select(Glottocode,Gender) %>%
+  # change to data frame
+  as.data.frame() %>%
+  drop_na() #remove NAs
+```
+
+We read in the phylogenetic trees and keep only the nodes for which we have data, and only keep the data that is in the trees.
+```{r message=FALSE, warning=FALSE}
+# only keep tip labels where we have data
+trees_ww <- drop.tip.multiPhylo(trees, 
+                             trees[[1]]$tip.label[!trees[[1]]$tip.label %in% ww.nom.sys$Glottocode])
+# only keep data for which we have the tree
+data.phy.ww.nom <- ww.nom.sys %>% filter(Glottocode %in% trees_ww[[1]]$tip.label)
+write_tsv(data.phy.ww.nom, "Gender_Systems/data/ww_nom_sys.txt")
+
+# re-arrange the order of tip.labels so that they match across trees
+trees_ww <- .compressTipLabel(trees_ww)
+# random check that they match
+all.equal(trees_ww[[1]]$tip.label, trees_ww[[5]]$tip.label)
+writeNexus(trees_ww %>% .uncompressTipLabel(),
+           "Gender_Systems/trees/trees_ww.nex")
+```
+
+Now we can run BayesTraits, with the config file found at: "/Gender_Systems/config/ww_nom_sys_config.txt".
+And load the log file here to plot the results (Fig.3a).
+```{r message=FALSE, warning=FALSE}
+ww_nom_log<- bt_read.log('Gender_Systems/log/world_nom-RJHPoutput.Log.txt')
+
+gender_density_n <- select(as_tibble(ww_nom_log), q12, q13, q14, q21, q23, q24, q31, q32, q34, q41, q42, q43) %>%
+  gather() #make long format for ggplot
+
+dens_plot_nom <- ggplot(gender_density_n,
+                           aes(y = value, x = key, fill = key)) +
+  ylim(c(0,0.5)) +
+  geom_boxplot(alpha = 0.5) +
+  xlab("Transition rate") +
+  ylab("Density") +
+  scale_fill_discrete(name = "Transitions") +
+  theme_classic() +
+  theme(legend.position = c(2,0.8), axis.text.x=element_text(angle=30, hjust=1)) +
+  ggtitle("Transition rates between Nominal Gender Systems") +
+  scale_x_discrete(labels = c('MF->MFN', 'MF->MN', 'MF->NONE', 'MFN->MF', 'MFN->MN', 'MFN->NONE', 'MN->MF', 'MN->MFN', 'MN->NONE', 'NONE->MF', 'NONE->MFN', 'NONE->MN'))
+
+print(dens_plot_nom)
+```
+
+```{r echo = FALSE, eval = FALSE}
+#Lastly, we combine the last two plots for the manuscript
+combined <- (dens_plot_gen | dens_plot_nom) +
+  plot_annotation(tag_levels = 'A') &   # adds A, B tags
+  theme(
+    legend.position = "none",           # removes all legends
+    plot.tag = element_text(size = 14, face = "bold")  # style for A/B/C labels
+  )
+
+# Display
+combined
+
+# Save to file
+ggsave("Figure3.png", combined, width = 14, height = 8, dpi = 300)
+```
+
+# Lexical analysis to evaluate the hypothesis whether semantic properties play a role in the emergence of gender systems
+Here we text whether the Animacy of a noun is correlated with specific genders, and whether the noun's belonging to the Culture or Nature realm, as defined in the paper, is correlated to specific genders. 
+
+#Animacy
+```{r message=FALSE, warning=FALSE}
+# read the data
+lex_gender <- read_excel("S4_Lexical_data_IE_Arawak.xlsx") %>%
+  select("Family", "Language", "GlottoCode", "Concept", "ReplaceGender2", "Animacy", "Culture") %>%
+  filter(ReplaceGender2 != "other") %>%
+  mutate(ReplaceGender2 = ifelse(ReplaceGender2 == "N/I", "N", ReplaceGender2)) %>%
+  rename(Gender = ReplaceGender2) %>%
+  rename(Glottocode = GlottoCode) %>%
+  drop_na()
+```
+
+## Animate-Inanimate
+```{r message=FALSE, warning=FALSE}
+lex_anim <- lex_gender %>%
+  mutate(Gender = recode(Gender,
+                         "C" = "Common",
+                         "F" = "Feminine",
+                         "M" = "Masculine",
+                         "N" = "Neuter")) %>%
+  mutate(Gender = factor(Gender, levels = rev(c("Masculine", "Feminine", "Neuter", "Common")))) %>%
+  count(Animacy, Gender) %>%
+  group_by(Animacy) %>%
+  mutate(Percentage = n / sum(n)) %>%
+  ungroup()
+
+contingency_table_anim <- lex_anim %>%
+  select(Animacy, Gender, n) %>%
+  pivot_wider(names_from = Gender, values_from = n, values_fill = 0) %>%
+  column_to_rownames("Animacy") %>%
+  as.matrix()
+
+# Run chi-square test
+chisq_result_anim <- chisq.test(contingency_table_anim)
+print(chisq_result_anim)
+
+# Extract standardized residuals
+residuals_anim <- as.data.frame(as.table(chisq_result_anim$stdres))
+colnames(residuals_anim) <- c("Animacy", "Gender", "Residual")
+```
+
+# Per family analysis
+This pattern of High Animacy associated with Masculine and Common nouns and Low Animacy associated with Feminine and Neuter nouns also holds when we look at each family separately.
+```{r}
+### Arawak ###
+lex_anim_ar <- lex_gender %>%
+  filter(Family == "Arawak") %>%
+  mutate(Gender = recode(Gender,
+                         "C" = "Common",
+                         "F" = "Feminine",
+                         "M" = "Masculine",
+                         "N" = "Neuter")) %>%
+  mutate(Gender = factor(Gender, levels = rev(c("Masculine", "Feminine", "Neuter", "Common")))) %>%
+  count(Animacy, Gender) %>%
+  group_by(Animacy) %>%
+  mutate(Percentage = n / sum(n)) %>%
+  ungroup()
+
+contingency_table_anim_ar <- lex_anim_ar %>%
+  select(Animacy, Gender, n) %>%
+  pivot_wider(names_from = Gender, values_from = n, values_fill = 0) %>%
+  column_to_rownames("Animacy") %>%
+  as.matrix()
+
+# Run chi-square test
+chisq_result_anim_ar <- chisq.test(contingency_table_anim_ar)
+print(chisq_result_anim_ar)
+
+# Extract standardized residuals
+residuals_anim_ar <- as.data.frame(as.table(chisq_result_anim_ar$stdres))
+colnames(residuals_anim_ar) <- c("Animacy", "Gender", "Residual")
+
+# Plot standardized residuals with numbers
+ggplot(residuals_anim_ar, aes(x = Gender, y = Animacy, fill = Residual)) +
+  geom_tile(color = "grey95", size = 0.1) +
+  geom_text(
+    aes(label = round(Residual, 1)),
+    size = 3, color = "gray30", family = "Georgia"
+  ) +
+  scale_fill_gradient2(
+    low = "#b39ddb", mid = "white", high = "#80cbc4", midpoint = 0,
+    name = "Std. Residual"
+  ) +
+  labs(
+    title = "Arawak Standardized Residuals: Gender Distribution for Animacy",
+    x = "Gender", y = "Concept"
+  ) +
+  theme_minimal(base_family = "Georgia") +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 10, face = "bold"),
+    legend.position = "right"
+  )
+
+### Indo-European ###
+lex_anim_ie <- lex_gender %>%
+  filter(Family == "Indo-European") %>%
+  mutate(Gender = recode(Gender,
+                         "C" = "Common",
+                         "F" = "Feminine",
+                         "M" = "Masculine",
+                         "N" = "Neuter")) %>%
+  mutate(Gender = factor(Gender, levels = rev(c("Masculine", "Feminine", "Neuter", "Common")))) %>%
+  count(Animacy, Gender) %>%
+  group_by(Animacy) %>%
+  mutate(Percentage = n / sum(n)) %>%
+  ungroup()
+
+contingency_table_anim_ie <- lex_anim_ie %>%
+  select(Animacy, Gender, n) %>%
+  pivot_wider(names_from = Gender, values_from = n, values_fill = 0) %>%
+  column_to_rownames("Animacy") %>%
+  as.matrix()
+
+# Run chi-square test
+chisq_result_anim_ie <- chisq.test(contingency_table_anim_ie)
+print(chisq_result_anim_ie)
+
+# Extract standardized residuals
+residuals_anim_ie <- as.data.frame(as.table(chisq_result_anim_ie$stdres))
+colnames(residuals_anim_ie) <- c("Animacy", "Gender", "Residual")
+
+# Plot standardized residuals with numbers
+ggplot(residuals_anim_ie, aes(x = Gender, y = Animacy, fill = Residual)) +
+  geom_tile(color = "grey95", size = 0.1) +
+  geom_text(
+    aes(label = round(Residual, 1)),
+    size = 3, color = "gray30", family = "Georgia"
+  ) +
+  scale_fill_gradient2(
+    low = "#b39ddb", mid = "white", high = "#80cbc4", midpoint = 0,
+    name = "Std. Residual"
+  ) +
+  labs(
+    title = "Indo-European Standardized Residuals: Gender Distribution for Animacy",
+    x = "Gender", y = "Concept"
+  ) +
+  theme_minimal(base_family = "Georgia") +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 10, face = "bold"),
+    legend.position = "right"
+  )
+```
+
+# Culture - Nature
+```{r}
+lex_cul_nat <- lex_gender %>%
+  mutate(Gender = recode(Gender,
+                         "C" = "Common",
+                         "F" = "Feminine",
+                         "M" = "Masculine",
+                         "N" = "Neuter")) %>%
+  mutate(Gender = factor(Gender, levels = rev(c("Masculine", "Feminine", "Neuter", "Common")))) %>%
+  count(Culture, Gender) %>%
+  group_by(Culture) %>%
+  mutate(Percentage = n / sum(n)) %>%
+  ungroup()
+
+contingency_table_cul <- lex_cul_nat %>%
+  select(Culture, Gender, n) %>%
+  pivot_wider(names_from = Gender, values_from = n, values_fill = 0) %>%
+  column_to_rownames("Culture") %>%
+  as.matrix()
+
+# Run chi-square test
+chisq_result_cul <- chisq.test(contingency_table_cul)
+print(chisq_result_cul)
+
+# Extract standardized residuals
+residuals_cul <- as.data.frame(as.table(chisq_result_cul$stdres))
+colnames(residuals_cul) <- c("Culture", "Gender", "Residual")
+```
+
+# Per family analysis
+The pattern we see in the analysis of both family mainly hold for each family alone as well. Nature nouns are correlated with Masculine and Common and Culture nouns with Neuter and Feminine, though in the Indo-European family, there is no significant effect for the Feminine gender. 
+```{r}
+### Arawak ###
+lex_cul_nat_ar <- lex_gender %>%
+  filter(Family == "Arawak") %>%
+  mutate(Gender = recode(Gender,
+                         "C" = "Common",
+                         "F" = "Feminine",
+                         "M" = "Masculine",
+                         "N" = "Neuter")) %>%
+  mutate(Gender = factor(Gender, levels = rev(c("Masculine", "Feminine", "Neuter", "Common")))) %>%
+  count(Culture, Gender) %>%
+  group_by(Culture) %>%
+  mutate(Percentage = n / sum(n)) %>%
+  ungroup()
+
+contingency_table_cul_ar <- lex_cul_nat_ar %>%
+  select(Culture, Gender, n) %>%
+  pivot_wider(names_from = Gender, values_from = n, values_fill = 0) %>%
+  column_to_rownames("Culture") %>%
+  as.matrix()
+
+# Run chi-square test
+chisq_result_cul_ar <- chisq.test(contingency_table_cul_ar)
+print(chisq_result_cul_ar)
+
+# Extract standardized residuals
+residuals_cul_ar <- as.data.frame(as.table(chisq_result_cul_ar$stdres))
+colnames(residuals_cul_ar) <- c("Culture", "Gender", "Residual")
+
+# Plot standardized residuals with numbers
+ggplot(residuals_cul_ar, aes(x = Gender, y = Culture, fill = Residual)) +
+  geom_tile(color = "grey95", size = 0.1) +
+  geom_text(
+    aes(label = round(Residual, 1)),
+    size = 3, color = "gray30", family = "Georgia"
+  ) +
+  scale_fill_gradient2(
+    low = "#b39ddb", mid = "white", high = "#80cbc4", midpoint = 0,
+    name = "Std. Residual"
+  ) +
+  labs(
+    title = "Arawak Standardized Residuals: Gender Distribution for Culture - Nature",
+    x = "Gender", y = "Concept"
+  ) +
+  theme_minimal(base_family = "Georgia") +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 10, face = "bold"),
+    legend.position = "right"
+  )
+
+### Indo-European ###
+lex_cul_nat_ie <- lex_gender %>%
+  filter(Family == "Indo-European") %>%
+  mutate(Gender = recode(Gender,
+                         "C" = "Common",
+                         "F" = "Feminine",
+                         "M" = "Masculine",
+                         "N" = "Neuter")) %>%
+  mutate(Gender = factor(Gender, levels = rev(c("Masculine", "Feminine", "Neuter", "Common")))) %>%
+  count(Culture, Gender) %>%
+  group_by(Culture) %>%
+  mutate(Percentage = n / sum(n)) %>%
+  ungroup()
+
+contingency_table_cul_ie <- lex_cul_nat_ie %>%
+  select(Culture, Gender, n) %>%
+  pivot_wider(names_from = Gender, values_from = n, values_fill = 0) %>%
+  column_to_rownames("Culture") %>%
+  as.matrix()
+
+# Run chi-square test
+chisq_result_cul_ie <- chisq.test(contingency_table_cul_ie)
+print(chisq_result_cul_ie)
+
+# Extract standardized residuals
+residuals_cul_ie <- as.data.frame(as.table(chisq_result_cul_ie$stdres))
+colnames(residuals_cul_ie) <- c("Culture", "Gender", "Residual")
+
+# Plot standardized residuals with numbers
+ggplot(residuals_cul_ie, aes(x = Gender, y = Culture, fill = Residual)) +
+  geom_tile(color = "grey95", size = 0.1) +
+  geom_text(
+    aes(label = round(Residual, 1)),
+    size = 3, color = "gray30", family = "Georgia"
+  ) +
+  scale_fill_gradient2(
+    low = "#b39ddb", mid = "white", high = "#80cbc4", midpoint = 0,
+    name = "Std. Residual"
+  ) +
+  labs(
+    title = "Indo-European Standardized Residuals: Gender Distribution for Culture - Nature",
+    x = "Gender", y = "Concept"
+  ) +
+  theme_minimal(base_family = "Georgia") +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 10, face = "bold"),
+    legend.position = "right"
+  )
+```
+
+Plot both Animacy and Culture together for paper:
+```{r}
+# Standardize and add Category column
+residuals_anim <- residuals_anim %>%
+  rename(Dimension = Animacy) %>%
+  mutate(Category = Dimension) %>%   # Store original Animacy value
+  select(Category, Gender, Residual, Dimension)
+
+residuals_cul <- residuals_cul %>%
+  rename(Dimension = Culture) %>%
+  mutate(Category = Dimension) %>%   # Store original Culture value
+  select(Category, Gender, Residual, Dimension)
+
+residuals_both <- bind_rows(residuals_cul, residuals_anim)
+
+ggplot(residuals_both, aes(x = Gender, y = Category, fill = Residual)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Residual, 1)), size = 2, color = "black") +
+  scale_fill_gradient2(
+    low = "#b39ddb", mid = "white", high = "#80cbc4", midpoint = 0,
+    name = "Std. Residual"
+  ) +
+  theme_minimal(base_family = "Georgia") +
+  theme(
+    axis.title = element_blank(),        
+    axis.text.x = element_text(size = 6, face = "bold"),  
+    axis.text.y = element_text(size = 6),                  
+    axis.ticks = element_blank(),
+     legend.position = "none"
+  )
+
+ggsave("figure4.png", width = 6, height = 2, dpi = 300)
+```
