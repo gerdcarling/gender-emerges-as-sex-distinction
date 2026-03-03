@@ -1,0 +1,13 @@
+1
+2
+logfile world_gender_system-RJHPoutput.log
+# use the reverse jump
+RevJump gamma 1 1
+# setting stones to get the Bayes factors
+# stepping stone sampler with 100 stones and 1000 iterations per stone to estimate the marginal likelihood
+Stones 100 10000
+# Search for 1000000 generations, discard the first half
+burnin 1000000
+iterations 10000000
+sample 10000
+run
